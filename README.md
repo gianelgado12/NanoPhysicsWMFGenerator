@@ -28,6 +28,14 @@ Specify a different output path or adjust the scan settings:
 python WMFGenerator.py design.gds output.wmf --layer 3 --datatype 0 --spacing-nm 10 --angle 45
 ```
 
+Process multiple layers in one run by repeating `--layer`:
+
+```powershell
+python WMFGenerator.py design.gds --layer 1 --layer 3 --layer 5
+```
+
+This writes `design_layer_1.wmf`, `design_layer_3.wmf`, and `design_layer_5.wmf`, each with a matching `_dimensions.txt` report. If an output base path is supplied, the layer suffix is added to that base name. A single `--layer` keeps the normal output filename.
+
 Run `python WMFGenerator.py --help` to see all options.
 
 ## Options
@@ -36,7 +44,7 @@ Run `python WMFGenerator.py --help` to see all options.
 | --- | --- |
 | `input` | Input GDSII file. |
 | `output` | Optional WMF output path. Defaults to the input name with a `.wmf` extension. |
-| `--layer` | Required GDS layer number. |
+| `--layer` | Required GDS layer number. Repeat the option to process multiple layers in one run. |
 | `--datatype` | GDS datatype filter. Defaults to `0`. |
 | `--cell` | Cell to process. Required when the GDS contains multiple top-level cells. |
 | `--spacing-nm` | Distance between scan lines in nanometers. Defaults to `10`. The value is converted using the GDS library unit. |
