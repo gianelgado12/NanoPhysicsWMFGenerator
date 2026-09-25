@@ -375,7 +375,10 @@ def _build_parser() -> argparse.ArgumentParser:
 		"output", nargs="?", type=Path,
 		help="output WMF file (defaults to the input name with .wmf extension)",
 	)
-	parser.add_argument("--layer", required=True, type=int, help="GDS layer number")
+	parser.add_argument(
+		"--layer", dest="layers", action="append", required=True, type=int,
+		help="GDS layer number; repeat this option to process multiple layers",
+	)
 	parser.add_argument(
 		"--datatype", type=int, default=0, help="GDS datatype (default: 0)"
 	)
@@ -407,35 +410,51 @@ def main(argv: list[str] | None = None) -> int:
 		parser.error("--angle must be a finite number")
 
 	input_path = args.input.expanduser().resolve()
-	output_path = (
+	base_output_path = (
 		args.output.expanduser().resolve()
 		if args.output
 		else input_path.with_suffix(".wmf")
 	)
-	if input_path == output_path:
+	if input_path == base_output_path:
 		parser.error("input and output paths must be different")
 	if not input_path.is_file():
 		parser.error(f"input file does not exist: {input_path}")
+	layers = list(dict.fromkeys(args.layers))
+	output_paths = {
+		layer: (
+			base_output_path
+			if len(layers) == 1
+			else base_output_path.with_name(
+				f"{base_output_path.stem}_layer_{layer}{base_output_path.suffix}"
+			)
+		)
+		for layer in layers
+	}
 
 	try:
-		geometry, unit_m = _load_layer_geometry(
-			input_path, args.layer, args.datatype, args.cell
-		)
-		spacing = args.spacing_nm / (unit_m * 1e9)
-		paths = _make_scan_paths(geometry, spacing, args.angle)
+		prepared_layers = []
+		for layer in layers:
+			geometry, unit_m = _load_layer_geometry(
+				input_path, layer, args.datatype, args.cell
+			)
+			spacing = args.spacing_nm / (unit_m * 1e9)
+			paths = _make_scan_paths(geometry, spacing, args.angle)
+			prepared_layers.append((layer, output_paths[layer], paths, unit_m))
+
 		origin = (0.0, 0.0) if args.no_recenter else None
-		_write_wmf(output_path, paths, origin)
-		dimensions_path, width_um, height_um = _write_dimensions(
-			output_path, paths, unit_m
-		)
+		for layer, output_path, paths, unit_m in prepared_layers:
+			_write_wmf(output_path, paths, origin)
+			dimensions_path, width_um, height_um = _write_dimensions(
+				output_path, paths, unit_m
+			)
+			print(f"Layer {layer}: wrote {len(paths)} continuous shape paths to {output_path}")
+			print(
+				f"Path dimensions: {width_um:.6f} x {height_um:.6f} micrometers "
+				f"(details: {dimensions_path})"
+			)
 	except (OSError, RuntimeError, ValueError) as error:
 		parser.error(str(error))
 
-	print(f"Wrote {len(paths)} continuous shape paths to {output_path}")
-	print(
-		f"Path dimensions: {width_um:.6f} x {height_um:.6f} micrometers "
-		f"(details: {dimensions_path})"
-	)
 	return 0
 
 
