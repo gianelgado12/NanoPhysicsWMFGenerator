@@ -6,7 +6,9 @@ import argparse
 import ctypes
 import heapq
 import math
+import struct
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -85,11 +87,17 @@ def _line_parts(geometry: Any) -> list[Any]:
 	return []
 
 
+def _roundoff_tolerance(geometry: Any) -> float:
+	scale = max(1.0, *(abs(value) for value in geometry.bounds))
+	return math.ulp(scale) * 256
+
+
 def _build_visibility_graph(
 	polygon: Any,
 ) -> tuple[list[tuple[float, float]], list[list[tuple[int, float]]]]:
 	from shapely.geometry import LineString
 
+	routing_polygon = polygon.buffer(_roundoff_tolerance(polygon))
 	vertices = list(dict.fromkeys(
 		(x, y)
 		for ring in [polygon.exterior, *polygon.interiors]
@@ -99,7 +107,7 @@ def _build_visibility_graph(
 	for first_index, first in enumerate(vertices):
 		for second_index in range(first_index + 1, len(vertices)):
 			second = vertices[second_index]
-			if polygon.covers(LineString([first, second])):
+			if routing_polygon.covers(LineString([first, second])):
 				distance = math.dist(first, second)
 				graph[first_index].append((second_index, distance))
 				graph[second_index].append((first_index, distance))
@@ -114,6 +122,7 @@ def _shortest_inside_route(
 ) -> list[tuple[float, float]]:
 	from shapely.geometry import LineString
 
+	routing_polygon = polygon.buffer(_roundoff_tolerance(polygon))
 	vertices, boundary_graph = visibility_graph
 	coordinates = [start, end, *vertices]
 	graph: list[list[tuple[int, float]]] = [[] for _ in coordinates]
@@ -123,7 +132,7 @@ def _shortest_inside_route(
 
 	for endpoint_index, endpoint in enumerate((start, end)):
 		for vertex_index, vertex in enumerate(vertices):
-			if polygon.covers(LineString([endpoint, vertex])):
+			if routing_polygon.covers(LineString([endpoint, vertex])):
 				distance = math.dist(endpoint, vertex)
 				graph[endpoint_index].append((vertex_index + 2, distance))
 				graph[vertex_index + 2].append((endpoint_index, distance))
@@ -240,17 +249,25 @@ def _write_dimensions(
 
 def _wmf_coordinates(
 	paths: list[Any],
-	center: tuple[float, float],
+	origin: tuple[float, float] | None,
 ) -> list[list[tuple[int, int]]]:
 	path_coordinates = [list(path.coords) for path in paths]
 	all_points = [point for coordinates in path_coordinates for point in coordinates]
 	if not all_points:
 		raise ValueError("No toolpath coordinates were generated.")
-	center_x, center_y = center
-	max_offset = max(
-		max(abs(point[0] - center_x), abs(point[1] - center_y))
-		for point in all_points
-	)
+	if origin is None:
+		origin_x = min(point[0] for point in all_points)
+		origin_y = min(point[1] for point in all_points)
+		max_offset = max(
+			max(point[0] for point in all_points) - origin_x,
+			max(point[1] for point in all_points) - origin_y,
+		)
+	else:
+		origin_x, origin_y = origin
+		max_offset = max(
+			max(abs(point[0] - origin_x), abs(point[1] - origin_y))
+			for point in all_points
+		)
 	if max_offset <= 0:
 		raise ValueError("The toolpath has no representable area in WMF coordinates.")
 	scale = 30000 / max_offset
@@ -259,7 +276,7 @@ def _wmf_coordinates(
 	for coordinates in path_coordinates:
 		converted = []
 		for x, y in coordinates:
-			point = (round((x - center_x) * scale), round((y - center_y) * scale))
+			point = (round((x - origin_x) * scale), round((y - origin_y) * scale))
 			if not converted or converted[-1] != point:
 				converted.append(point)
 		if len(converted) > 1:
@@ -269,10 +286,38 @@ def _wmf_coordinates(
 	return converted_paths
 
 
+def _placeable_wmf_header(
+	paths: list[list[tuple[int, int]]],
+) -> bytes:
+	points = [point for path in paths for point in path]
+	left = min(point[0] for point in points)
+	top = min(point[1] for point in points)
+	right = max(point[0] for point in points)
+	bottom = max(point[1] for point in points)
+	if any(value < -32768 or value > 32767 for value in (left, top, right, bottom)):
+		raise ValueError("WMF bounds exceed the placeable header coordinate range.")
+
+	header = struct.pack(
+		"<IHhhhhHI",
+		0x9AC6CDD7,
+		0,
+		left,
+		top,
+		right,
+		bottom,
+		2540,
+		0,
+	)
+	checksum = 0
+	for (word,) in struct.iter_unpack("<H", header):
+		checksum ^= word
+	return header + struct.pack("<H", checksum)
+
+
 def _write_wmf(
 	output_path: Path,
 	paths: list[Any],
-	center: tuple[float, float],
+	origin: tuple[float, float] | None,
 ) -> None:
 	if sys.platform != "win32":
 		raise RuntimeError("WMF output currently requires Windows.")
@@ -290,25 +335,31 @@ def _write_wmf(
 	gdi32.DeleteMetaFile.argtypes = [handle_type]
 	gdi32.DeleteMetaFile.restype = ctypes.c_int
 
-	device_context = gdi32.CreateMetaFileW(str(output_path), None)
-	if not device_context:
-		raise ctypes.WinError(ctypes.get_last_error())
+	converted_paths = _wmf_coordinates(paths, origin)
+	placeable_header = _placeable_wmf_header(converted_paths)
+	with tempfile.TemporaryDirectory() as temporary_directory:
+		standard_path = Path(temporary_directory) / output_path.name
+		device_context = gdi32.CreateMetaFileW(str(standard_path), None)
+		if not device_context:
+			raise ctypes.WinError(ctypes.get_last_error())
 
-	metafile = None
-	try:
-		for coordinates in _wmf_coordinates(paths, center):
-			start = coordinates[0]
-			if not gdi32.MoveToEx(device_context, start[0], start[1], None):
-				raise ctypes.WinError(ctypes.get_last_error())
-			for x, y in coordinates[1:]:
-				if not gdi32.LineTo(device_context, x, y):
+		metafile = None
+		try:
+			for coordinates in converted_paths:
+				start = coordinates[0]
+				if not gdi32.MoveToEx(device_context, start[0], start[1], None):
 					raise ctypes.WinError(ctypes.get_last_error())
-	finally:
-		metafile = gdi32.CloseMetaFile(device_context)
-		if metafile:
-			gdi32.DeleteMetaFile(metafile)
-	if not metafile:
-		raise ctypes.WinError(ctypes.get_last_error())
+				for x, y in coordinates[1:]:
+					if not gdi32.LineTo(device_context, x, y):
+						raise ctypes.WinError(ctypes.get_last_error())
+		finally:
+			metafile = gdi32.CloseMetaFile(device_context)
+			if metafile:
+				gdi32.DeleteMetaFile(metafile)
+		if not metafile:
+			raise ctypes.WinError(ctypes.get_last_error())
+
+		output_path.write_bytes(placeable_header + standard_path.read_bytes())
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -334,7 +385,7 @@ def _build_parser() -> argparse.ArgumentParser:
 	parser.add_argument(
 		"--no-recenter",
 		action="store_true",
-		help="keep the GDS origin instead of centering on the layer centroid",
+		help="keep the GDS origin instead of placing the extent corner at WMF (0, 0)",
 	)
 	parser.add_argument(
 		"--spacing-nm", type=float, default=10.0,
@@ -372,8 +423,8 @@ def main(argv: list[str] | None = None) -> int:
 		)
 		spacing = args.spacing_nm / (unit_m * 1e9)
 		paths = _make_scan_paths(geometry, spacing, args.angle)
-		center = (0.0, 0.0) if args.no_recenter else (geometry.centroid.x, geometry.centroid.y)
-		_write_wmf(output_path, paths, center)
+		origin = (0.0, 0.0) if args.no_recenter else None
+		_write_wmf(output_path, paths, origin)
 		dimensions_path, width_um, height_um = _write_dimensions(
 			output_path, paths, unit_m
 		)

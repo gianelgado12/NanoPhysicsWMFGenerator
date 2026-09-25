@@ -41,13 +41,13 @@ Run `python WMFGenerator.py --help` to see all options.
 | `--cell` | Cell to process. Required when the GDS contains multiple top-level cells. |
 | `--spacing-nm` | Distance between scan lines in nanometers. Defaults to `10`. The value is converted using the GDS library unit. |
 | `--angle` | Scan-line angle in degrees. Defaults to `0`. |
-| `--no-recenter` | Disable default recentering. By default, the selected layer's merged polygon geometry is centered on its area centroid; this option keeps the GDS origin at the WMF origin. |
+| `--no-recenter` | Disable default extent recentering. By default, the minimum corner of the generated path's bounding box maps to WMF `(0, 0)` and all coordinates are nonnegative; this option keeps the GDS origin at the WMF origin. |
 
 ## Outputs
 
 For `output.wmf`, the tool writes `output_dimensions.txt` with the generated path's bounding-box width and height in micrometers. These dimensions are calculated from the GDS physical unit and path coordinates before WMF coordinate normalization.
 
-The WMF coordinates are normalized to fit the format's logical-coordinate range. Consequently, the text report describes the path's intended physical dimensions, but software that opens or imports the WMF may rescale it.
+The WMF is written with an Aldus placeable header, with bounds derived from the generated path coordinates and `2540` logical units per inch. Its coordinates are normalized to fit the format's logical-coordinate range. Consequently, the text report describes the path's intended physical dimensions, but software that opens or imports the WMF may rescale it.
 
 ## Geometry and Path Behavior
 
