@@ -14,6 +14,7 @@ from typing import Any
 
 
 def _polygonal_parts(geometry: Any) -> list[Any]:
+	"""Extract polygons recursively from a Shapely geometry collection."""
 	if geometry.geom_type == "Polygon":
 		return [geometry]
 	if hasattr(geometry, "geoms"):
@@ -27,6 +28,7 @@ def _load_layer_geometry(
 	datatype: int,
 	cell_name: str | None,
 ) -> tuple[Any, float]:
+	"""Load and merge the requested layer, repairing self-touching hole rings."""
 	try:
 		import gdstk
 		from shapely.geometry import Polygon
@@ -88,6 +90,7 @@ def _line_parts(geometry: Any) -> list[Any]:
 
 
 def _roundoff_tolerance(geometry: Any) -> float:
+	"""Return a coordinate-scale tolerance for floating-point routing checks."""
 	scale = max(1.0, *(abs(value) for value in geometry.bounds))
 	return math.ulp(scale) * 256
 
@@ -95,6 +98,7 @@ def _roundoff_tolerance(geometry: Any) -> float:
 def _build_visibility_graph(
 	polygon: Any,
 ) -> tuple[list[tuple[float, float]], list[list[tuple[int, float]]]]:
+	"""Connect boundary vertices whose straight-line segment stays in the polygon."""
 	from shapely.geometry import LineString
 
 	routing_polygon = polygon.buffer(_roundoff_tolerance(polygon))
@@ -120,6 +124,7 @@ def _shortest_inside_route(
 	end: tuple[float, float],
 	visibility_graph: tuple[list[tuple[float, float]], list[list[tuple[int, float]]]],
 ) -> list[tuple[float, float]]:
+	"""Use Dijkstra's algorithm to route a connector through visible boundary vertices."""
 	from shapely.geometry import LineString
 
 	routing_polygon = polygon.buffer(_roundoff_tolerance(polygon))
@@ -167,6 +172,7 @@ def _shortest_inside_route(
 
 
 def _polygon_scan_path(polygon: Any, spacing: float, angle: float) -> Any:
+	"""Build one serpentine fill path, routing every connector inside the polygon."""
 	from shapely.affinity import rotate
 	from shapely.geometry import LineString
 
@@ -213,14 +219,103 @@ def _polygon_scan_path(polygon: Any, spacing: float, angle: float) -> Any:
 	return rotate(LineString(coordinates), angle, origin=origin)
 
 
-def _make_scan_paths(geometry: Any, spacing: float, angle: float) -> list[Any]:
+def _contour_loops(polygon: Any, spacing: float) -> list[list[tuple[float, float]]]:
+	"""Return counter-clockwise inset loops ordered from the outer edge inward."""
+	from shapely.geometry import LinearRing
+
+	rings = []
+	last = 0.0
+	index = 0
+	while True:
+		distance = spacing / 2 + index * spacing
+		inset = polygon.buffer(-distance, join_style="mitre")
+		if inset.is_empty:
+			break
+		for part in _polygonal_parts(inset):
+			rings.extend([part.exterior, *part.interiors])
+		last = distance
+		index += 1
+	if not rings:
+		raise ValueError(
+			"The selected shape is narrower than the scan spacing. "
+			"Reduce --spacing-nm."
+		)
+
+	# Bisect for the deepest non-empty inset so a leftover core strip still gets a pass.
+	low, high = last, last + spacing
+	for _ in range(30):
+		middle = (low + high) / 2
+		if polygon.buffer(-middle, join_style="mitre").is_empty:
+			high = middle
+		else:
+			low = middle
+	if low - last > spacing * 0.51:
+		core = polygon.buffer(-low, join_style="mitre")
+		rings.extend(part.exterior for part in _polygonal_parts(core))
+
+	rings.sort(key=polygon.exterior.distance)
+	loops = []
+	for ring in rings:
+		coordinates = list(ring.coords)
+		loops.append(coordinates if LinearRing(coordinates).is_ccw else coordinates[::-1])
+	return loops
+
+
+def _polygon_contour_path(polygon: Any, spacing: float, inward: bool) -> Any:
+	"""Build one path of concentric inset loops joined by short in-shape steps."""
+	from shapely.geometry import LineString, Point
+	from shapely.ops import substring
+
+	loops = _contour_loops(polygon, spacing)
+	if not inward:
+		loops.reverse()
+	routing_polygon = polygon.buffer(_roundoff_tolerance(polygon))
+	coordinates: list[tuple[float, float]] = []
+	visibility_graph = None
+	for loop in loops:
+		line = LineString(loop)
+		connector: list[tuple[float, float]] = []
+		distance = 0.0
+		if coordinates:
+			end = coordinates[-1]
+			distance = line.project(Point(end))
+			start_point = line.interpolate(distance)
+			start = (start_point.x, start_point.y)
+			if routing_polygon.covers(LineString([end, start])):
+				connector = [end, start]
+			else:
+				if visibility_graph is None:
+					visibility_graph = _build_visibility_graph(polygon)
+				connector = _shortest_inside_route(polygon, end, start, visibility_graph)
+		if 0 < distance < line.length:
+			head = substring(line, distance, line.length)
+			tail = substring(line, 0, distance)
+			ordered = list(head.coords) + list(tail.coords)[1:]
+		else:
+			ordered = list(line.coords)
+		coordinates.extend(connector[1:])
+		coordinates.extend(ordered[1:] if coordinates else ordered)
+	return LineString(coordinates)
+
+
+def _make_scan_paths(
+	geometry: Any,
+	spacing: float,
+	angle: float,
+	pattern: str = "raster",
+	inward: bool = True,
+) -> list[Any]:
+	"""Generate one continuous raster or contour path for each connected polygon component."""
 	components = _polygonal_parts(geometry)
 	if not components:
 		raise ValueError("The selected layer contains no polygonal geometry.")
+	if pattern == "contour":
+		return [_polygon_contour_path(polygon, spacing, inward) for polygon in components]
 	return [_polygon_scan_path(polygon, spacing, angle) for polygon in components]
 
 
 def _path_dimensions_um(paths: list[Any], unit_m: float) -> tuple[float, float]:
+	"""Measure the paths' combined bounding box using the source GDS unit."""
 	coordinates = [point for path in paths for point in path.coords]
 	if not coordinates:
 		raise ValueError("No toolpath coordinates were generated.")
@@ -235,6 +330,7 @@ def _write_dimensions(
 	paths: list[Any],
 	unit_m: float,
 ) -> tuple[Path, float, float]:
+	"""Write a sidecar report of path bounds in micrometers."""
 	width_um, height_um = _path_dimensions_um(paths, unit_m)
 	dimensions_path = output_path.with_name(f"{output_path.stem}_dimensions.txt")
 	dimensions_path.write_text(
@@ -251,6 +347,7 @@ def _wmf_coordinates(
 	paths: list[Any],
 	origin: tuple[float, float] | None,
 ) -> list[list[tuple[int, int]]]:
+	"""Scale paths to WMF coordinates, placing the extent at zero by default."""
 	path_coordinates = [list(path.coords) for path in paths]
 	all_points = [point for coordinates in path_coordinates for point in coordinates]
 	if not all_points:
@@ -289,6 +386,7 @@ def _wmf_coordinates(
 def _placeable_wmf_header(
 	paths: list[list[tuple[int, int]]],
 ) -> bytes:
+	"""Build an Aldus header whose bounds match the encoded WMF paths."""
 	points = [point for path in paths for point in path]
 	left = min(point[0] for point in points)
 	top = min(point[1] for point in points)
@@ -319,6 +417,7 @@ def _write_wmf(
 	paths: list[Any],
 	origin: tuple[float, float] | None,
 ) -> None:
+	"""Record paths through Windows GDI and prepend the placeable-file header."""
 	if sys.platform != "win32":
 		raise RuntimeError("WMF output currently requires Windows.")
 
@@ -326,10 +425,8 @@ def _write_wmf(
 	handle_type = ctypes.c_void_p
 	gdi32.CreateMetaFileW.argtypes = [ctypes.c_wchar_p, handle_type]
 	gdi32.CreateMetaFileW.restype = handle_type
-	gdi32.MoveToEx.argtypes = [handle_type, ctypes.c_int, ctypes.c_int, handle_type]
-	gdi32.MoveToEx.restype = ctypes.c_int
-	gdi32.LineTo.argtypes = [handle_type, ctypes.c_int, ctypes.c_int]
-	gdi32.LineTo.restype = ctypes.c_int
+	gdi32.Polyline.argtypes = [handle_type, ctypes.POINTER(ctypes.c_long * 2), ctypes.c_int]
+	gdi32.Polyline.restype = ctypes.c_int
 	gdi32.CloseMetaFile.argtypes = [handle_type]
 	gdi32.CloseMetaFile.restype = handle_type
 	gdi32.DeleteMetaFile.argtypes = [handle_type]
@@ -346,12 +443,9 @@ def _write_wmf(
 		metafile = None
 		try:
 			for coordinates in converted_paths:
-				start = coordinates[0]
-				if not gdi32.MoveToEx(device_context, start[0], start[1], None):
+				points = ((ctypes.c_long * 2) * len(coordinates))(*coordinates)
+				if not gdi32.Polyline(device_context, points, len(coordinates)):
 					raise ctypes.WinError(ctypes.get_last_error())
-				for x, y in coordinates[1:]:
-					if not gdi32.LineTo(device_context, x, y):
-						raise ctypes.WinError(ctypes.get_last_error())
 		finally:
 			metafile = gdi32.CloseMetaFile(device_context)
 			if metafile:
@@ -366,8 +460,9 @@ def _build_parser() -> argparse.ArgumentParser:
 	parser = argparse.ArgumentParser(
 		description="Create a WMF hatch path from polygons in a GDSII layer.",
 		epilog=(
-			"Example: python WMFGenerator.py chip.gds --layer 3 "
-			"--spacing-nm 10 --angle 45"
+			"Examples: python WMFGenerator.py chip.gds --layer 3 "
+			"--spacing-nm 10 --angle 45; "
+			"python WMFGenerator.py chip.gds --layer 3 --pattern contour"
 		),
 	)
 	parser.add_argument("input", type=Path, help="input GDSII file")
@@ -395,19 +490,32 @@ def _build_parser() -> argparse.ArgumentParser:
 		help="distance between scan lines in nanometers (default: 10)",
 	)
 	parser.add_argument(
-		"--angle", type=float, default=0.0,
-		help="scan-line angle in degrees (default: 0)",
+		"--pattern", choices=("raster", "contour"), default="raster",
+		help="fill pattern: back-and-forth raster lines or concentric contour loops (default: raster)",
+	)
+	parser.add_argument(
+		"--angle", type=float, default=None,
+		help="raster scan-line angle in degrees (default: 0); not allowed with --pattern contour",
+	)
+	parser.add_argument(
+		"--spiral", choices=("inward", "outward"), default=None,
+		help="contour direction: from the outer edge inward or the reverse (default: inward)",
 	)
 	return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+	"""Generate WMF and dimensions files for each requested GDS layer."""
 	parser = _build_parser()
 	args = parser.parse_args(argv)
 	if not math.isfinite(args.spacing_nm) or args.spacing_nm <= 0:
 		parser.error("--spacing-nm must be a finite number greater than zero")
-	if not math.isfinite(args.angle):
+	if args.angle is not None and not math.isfinite(args.angle):
 		parser.error("--angle must be a finite number")
+	if args.pattern == "contour" and args.angle is not None:
+		parser.error("--angle cannot be used with --pattern contour")
+	if args.pattern == "raster" and args.spiral is not None:
+		parser.error("--spiral requires --pattern contour")
 
 	input_path = args.input.expanduser().resolve()
 	base_output_path = (
@@ -432,13 +540,20 @@ def main(argv: list[str] | None = None) -> int:
 	}
 
 	try:
+		# Prepare every layer before writing so geometry errors do not leave partial batches.
 		prepared_layers = []
 		for layer in layers:
 			geometry, unit_m = _load_layer_geometry(
 				input_path, layer, args.datatype, args.cell
 			)
 			spacing = args.spacing_nm / (unit_m * 1e9)
-			paths = _make_scan_paths(geometry, spacing, args.angle)
+			paths = _make_scan_paths(
+			geometry,
+			spacing,
+			0.0 if args.angle is None else args.angle,
+			args.pattern,
+			args.spiral != "outward",
+		)
 			prepared_layers.append((layer, output_paths[layer], paths, unit_m))
 
 		origin = (0.0, 0.0) if args.no_recenter else None
