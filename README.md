@@ -46,6 +46,14 @@ This writes `design_layer_1.wmf`, `design_layer_3.wmf`, and `design_layer_5.wmf`
 
 Run `python WMFGenerator.py --help` to see all options.
 
+## KLayout Macro
+
+[klayout/generate_wmf.py](klayout/generate_wmf.py) adds **Tools → Generate WMF hatch path from the active cell** to KLayout. The command-line tool is unchanged; the macro saves the layout to a temporary GDS and runs `WMFGenerator.py` in a separate Python interpreter, because KLayout's built-in Python does not include `gdstk` and `shapely`.
+
+To install, copy the macro into KLayout's `pymacros` folder (for example `C:\Users\<you>\KLayout\pymacros`) and restart KLayout. The first run asks for the Python interpreter that has the packages from `requirements.txt` installed and for the location of `WMFGenerator.py`; both are remembered in `wmf_generator_settings.json` in your KLayout folder, along with the last pitch and pattern. Setting the `WMF_GENERATOR_PYTHON` environment variable also selects the interpreter.
+
+The macro opens a single form with checkboxes for the layers in the active cell (`layer/datatype`; all selected layers must share one datatype), the pitch, the pattern (raster, contour inward or contour outward), the scan angle (raster only), whether to place the path's corner at WMF `(0, 0)`, and the output file. The previous choices are remembered. Errors from the tool are shown in a message box.
+
 ## Options
 
 | Option | Description |
