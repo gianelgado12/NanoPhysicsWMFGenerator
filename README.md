@@ -54,6 +54,12 @@ To install, copy the macro into KLayout's `pymacros` folder (for example `C:\Use
 
 The macro opens a single form with checkboxes for the layers in the active cell (`layer/datatype`; all selected layers must share one datatype), the pitch, the pattern (raster, contour inward or contour outward), the scan angle (raster only), whether to place the path's corner at WMF `(0, 0)`, and the output file. The previous choices are remembered. Errors from the tool are shown in a message box.
 
+### Border macro
+
+[klayout/create_border.py](klayout/create_border.py) adds **Tools → Create a border polygon around a region**. It only draws geometry and does not generate a WMF. Install it the same way, then trace the result with the hatch path tool using the contour pattern.
+
+The form asks for the target layer and datatype, the region of interest (center X and Y, width and height in microns), the border width, and where the border sits: outside the region, inside it, or centered on its edge. The region defaults to the bounding box of the active cell, or 50 × 50 µm for an empty cell. The border is added to the layer as one rectangular ring polygon, inside an undo step, and any shapes already on that layer are left in place, so use an empty layer to trace only the border.
+
 ## Options
 
 | Option | Description |
