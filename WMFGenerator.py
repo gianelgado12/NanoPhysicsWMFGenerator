@@ -347,17 +347,17 @@ def _wmf_coordinates(
 	paths: list[Any],
 	origin: tuple[float, float] | None,
 ) -> list[list[tuple[int, int]]]:
-	"""Scale paths to WMF coordinates, placing the extent at zero by default."""
+	"""Scale paths to WMF coordinates with y flipped, placing the extent corner at zero by default."""
 	path_coordinates = [list(path.coords) for path in paths]
 	all_points = [point for coordinates in path_coordinates for point in coordinates]
 	if not all_points:
 		raise ValueError("No toolpath coordinates were generated.")
 	if origin is None:
 		origin_x = min(point[0] for point in all_points)
-		origin_y = min(point[1] for point in all_points)
+		origin_y = max(point[1] for point in all_points)
 		max_offset = max(
 			max(point[0] for point in all_points) - origin_x,
-			max(point[1] for point in all_points) - origin_y,
+			origin_y - min(point[1] for point in all_points),
 		)
 	else:
 		origin_x, origin_y = origin
@@ -373,7 +373,8 @@ def _wmf_coordinates(
 	for coordinates in path_coordinates:
 		converted = []
 		for x, y in coordinates:
-			point = (round((x - origin_x) * scale), round((y - origin_y) * scale))
+			# WMF y grows downward, so flip y to keep the layout's orientation.
+			point = (round((x - origin_x) * scale), round((origin_y - y) * scale))
 			if not converted or converted[-1] != point:
 				converted.append(point)
 		if len(converted) > 1:
@@ -483,7 +484,7 @@ def _build_parser() -> argparse.ArgumentParser:
 	parser.add_argument(
 		"--no-recenter",
 		action="store_true",
-		help="keep the GDS origin instead of placing the extent corner at WMF (0, 0)",
+		help="keep the GDS origin instead of placing the extent's top-left corner at WMF (0, 0)",
 	)
 	parser.add_argument(
 		"--spacing-nm", type=float, default=10.0,
